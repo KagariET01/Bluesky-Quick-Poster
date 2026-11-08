@@ -1,5 +1,5 @@
 // 自架 PDS 位址
-const PDS_URL = 'https://bsky.kandayuri.net';
+// const PDS_URL = 'https://bsky.kandayuri.net';
 
 // 全域狀態鎖與發送旗標
 let isPostingLocked = false;
@@ -554,6 +554,7 @@ async function extractTweetsFromModal() {
 }
 
 // 6. 登入取得 Bluesky Session
+// 取得 Bluesky Session（動態取得 PDS 網址）
 async function getBskySession() {
 	if (!chrome.runtime?.id) {
 		throw new Error('擴充功能已重新載入，請按 F5 重新整理頁面！');
@@ -562,107 +563,160 @@ async function getBskySession() {
 	const { handle, appPassword } = await chrome.storage.local.get(['handle', 'appPassword']);
 	if (!handle || !appPassword) throw new Error('擴充功能中尚未設定 Bluesky Handle 或 App Password');
 
-	const res = await fetch(`${PDS_URL}/xrpc/com.atproto.server.createSession`, {
+	// 動態獲取該使用者的 PDS 網址
+	const pdsUrl = await resolvePdsUrl(handle);
+
+	const res = await fetch(`${pdsUrl}/xrpc/com.atproto.server.createSession`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
 		body: JSON.stringify({ identifier: handle, password: appPassword }),
 	});
 
 	if (!res.ok) throw new Error('Bluesky 登入驗證失敗');
-	return await res.json();
+	const session = await res.json();
+	
+	return { ...session, pdsUrl };
 }
 
 // 7. 上傳圖片 Blob 到自架 PDS
-async function uploadBlobToPDS(jwt, blob) {
-	const res = await fetch(`${PDS_URL}/xrpc/com.atproto.repo.uploadBlob`, {
-		method: 'POST',
-		headers: {
-			Authorization: `Bearer ${jwt}`,
-			'Content-Type': blob.type || 'image/jpeg',
-		},
-		body: blob,
-	});
+// 上傳圖片 Blob 到該使用者的動態 PDS
+async function uploadBlobToPDS(pdsUrl, jwt, blob) {
+  const res = await fetch(`${pdsUrl}/xrpc/com.atproto.repo.uploadBlob`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      'Content-Type': blob.type || 'image/jpeg',
+    },
+    body: blob,
+  });
 
-	if (!res.ok) {
-		const errText = await res.text();
-		throw new Error(`上傳圖片到 PDS 失敗: ${errText}`);
-	}
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`上傳圖片到 PDS 失敗: ${errText}`);
+  }
 
-	const data = await res.json();
-	return data.blob;
+  const data = await res.json();
+  return data.blob;
 }
 
 // 8. 發布貼文至 Bluesky
+// 依序發布串文到動態 PDS
 async function postThreadToBluesky(postsData) {
-	const session = await getBskySession();
-	const jwt = session.accessJwt;
-	const did = session.did;
+  const session = await getBskySession();
+  const jwt = session.accessJwt;
+  const did = session.did;
+  const pdsUrl = session.pdsUrl;
 
-	let rootRef = null;
-	let parentRef = null;
+  let rootRef = null;
+  let parentRef = null;
 
-	for (let i = 0; i < postsData.length; i++) {
-		const postItem = postsData[i];
+  for (let i = 0; i < postsData.length; i++) {
+    const postItem = postsData[i];
 
-		let embed = undefined;
-		if (postItem.images && postItem.images.length > 0) {
-			const uploadedImages = [];
-			for (const imgBlob of postItem.images) {
-				const pdsBlobRef = await uploadBlobToPDS(jwt, imgBlob);
-				uploadedImages.push({
-					alt: '',
-					image: pdsBlobRef,
-				});
-			}
+    let embed = undefined;
+    if (postItem.images && postItem.images.length > 0) {
+      const uploadedImages = [];
+      for (const imgBlob of postItem.images) {
+        const pdsBlobRef = await uploadBlobToPDS(pdsUrl, jwt, imgBlob);
+        uploadedImages.push({
+          alt: '',
+          image: pdsBlobRef,
+        });
+      }
 
-			embed = {
-				$type: 'app.bsky.embed.images',
-				images: uploadedImages,
-			};
-		}
+      embed = {
+        $type: 'app.bsky.embed.images',
+        images: uploadedImages,
+      };
+    }
 
-		const record = {
-			$type: 'app.bsky.feed.post',
-			text: postItem.text,
-			createdAt: new Date().toISOString(),
-		};
+    const record = {
+      $type: 'app.bsky.feed.post',
+      text: postItem.text,
+      createdAt: new Date().toISOString(),
+    };
 
-		if (embed) {
-			record.embed = embed;
-		}
+    if (embed) {
+      record.embed = embed;
+    }
 
-		if (rootRef && parentRef) {
-			record.reply = {
-				root: { uri: rootRef.uri, cid: rootRef.cid },
-				parent: { uri: parentRef.uri, cid: parentRef.cid },
-			};
-		}
+    if (rootRef && parentRef) {
+      record.reply = {
+        root: { uri: rootRef.uri, cid: rootRef.cid },
+        parent: { uri: parentRef.uri, cid: parentRef.cid },
+      };
+    }
 
-		const res = await fetch(`${PDS_URL}/xrpc/com.atproto.repo.createRecord`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				Authorization: `Bearer ${jwt}`,
-			},
-			body: JSON.stringify({
-				repo: did,
-				collection: 'app.bsky.feed.post',
-				record: record,
-			}),
-		});
+    const res = await fetch(`${pdsUrl}/xrpc/com.atproto.repo.createRecord`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({
+        repo: did,
+        collection: 'app.bsky.feed.post',
+        record: record,
+      }),
+    });
 
-		if (!res.ok) {
-			const err = await res.json();
-			throw new Error(err.message || '無法建立貼文紀錄');
-		}
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.message || '無法建立貼文紀錄');
+    }
 
-		const createdRecord = await res.json();
+    const createdRecord = await res.json();
 
-		if (!rootRef) {
-			rootRef = { uri: createdRecord.uri, cid: createdRecord.cid };
-		}
-		parentRef = { uri: createdRecord.uri, cid: createdRecord.cid };
+    if (!rootRef) {
+      rootRef = { uri: createdRecord.uri, cid: createdRecord.cid };
+    }
+    parentRef = { uri: createdRecord.uri, cid: createdRecord.cid };
+  }
+}
+
+// 根據 handle 自動解析該帳號所屬的權威 PDS 伺服器網址
+async function resolvePdsUrl(handle) {
+	// 檢查快取，避免每次發文重複發出解析請求
+	const cacheKey = `pds_url_${handle}`;
+	const cached = await chrome.storage.local.get([cacheKey]);
+	if (cached[cacheKey]) {
+		return cached[cacheKey];
 	}
+
+	// 1. 透過官方公開端點將 Handle 解析為 DID
+	const resHandle = await fetch(
+		`https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`
+	);
+	if (!resHandle.ok) {
+		throw new Error(`無法解析 Handle (@${handle}) 的身分 DID`);
+	}
+	const { did } = await resHandle.json();
+
+	// 2. 依據 DID 類型取得 DID Document，尋找 #atproto_pds 服務宣告
+	let pdsUrl = '';
+	if (did.startsWith('did:plc:')) {
+		const resDoc = await fetch(`https://plc.directory/${did}`);
+		if (!resDoc.ok) throw new Error('無法從 PLC Directory 查詢帳號資料');
+		const doc = await resDoc.json();
+		const pdsService = doc.service?.find((s) => s.id === '#atproto_pds');
+		pdsUrl = pdsService?.serviceEndpoint;
+	} else if (did.startsWith('did:web:')) {
+		const domain = did.replace('did:web:', '');
+		const resDoc = await fetch(`https://${domain}/.well-known/did.json`);
+		if (!resDoc.ok) throw new Error('無法從 did:web 查詢帳號資料');
+		const doc = await resDoc.json();
+		const pdsService = doc.service?.find((s) => s.id === '#atproto_pds');
+		pdsUrl = pdsService?.serviceEndpoint;
+	}
+
+	if (!pdsUrl) {
+		throw new Error('找不到該帳號綁定的 PDS 服務端點');
+	}
+
+	// 移除尾隨斜線並快取
+	pdsUrl = pdsUrl.replace(/\/+$/, '');
+	await chrome.storage.local.set({ [cacheKey]: pdsUrl });
+	return pdsUrl;
 }
 
 init();

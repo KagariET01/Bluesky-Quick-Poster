@@ -1,8 +1,8 @@
 {
 	"manifest_version": 3,
 	"name": "Bluesky Quick Poster",
-	"version": "0.0.1",
-	"description": "在任何網頁點擊即可快速發布貼文至 Bluesky",
+	"version": "0.0.2",
+	"description": "在twitter同時把貼文貼到Bluesky",
 	"permissions": [
 		"storage"
 	],
@@ -10,7 +10,9 @@
 		"https://bsky.social/*",
 		"https://bsky.kandayuri.net/*",
 		"https://x.com/*",
-		"https://twitter.com/*"
+		"https://twitter.com/*",
+		"https://public.api.bsky.app/*",
+		"https://plc.directory/*"
 	],
 	"action": {
 		"default_popup": "popup.html",
