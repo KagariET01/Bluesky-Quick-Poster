@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="utf-8">
+	<style>
+		body { width: 320px; font-family: sans-serif; padding: 12px; margin: 0; }
+		.hidden { display: none; }
+		textarea { width: 100%; height: 90px; box-sizing: border-box; resize: none; margin-bottom: 8px; }
+		input { width: 100%; box-sizing: border-box; margin-bottom: 8px; padding: 6px; }
+		button { width: 100%; padding: 8px; background: #0085ff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+		button:disabled { background: #ccc; cursor: not-allowed; }
+		#status { margin-top: 8px; font-size: 12px; color: #555; }
+		.logout-link { font-size: 11px; color: #888; text-decoration: underline; cursor: pointer; float: right; }
+	</style>
+</head>
+<body>
+	<!-- 認證設定區塊 -->
+	<div id="auth-section">
+		<h4>登入 Bluesky</h4>
+		<input type="text" id="handle" placeholder="Handle (例如 you.bsky.social)">
+		<input type="password" id="app-password" placeholder="App Password (xxxx-xxxx-xxxx-xxxx)">
+		<button id="save-auth-btn">儲存並連接</button>
+	</div>
+
+	<!-- 發文操作區塊 -->
+	<div id="post-section" class="hidden">
+		<div>
+			<span id="user-display" style="font-weight: bold; font-size: 13px;"></span>
+			<span class="logout-link" id="logout-btn">更換帳號</span>
+		</div>
+		<div style="clear: both; margin-bottom: 8px;"></div>
+		<textarea id="post-text" placeholder="有什麼新鮮事？"></textarea>
+		<button id="submit-post-btn">發布貼文</button>
+	</div>
+
+	<div id="status"></div>
+
+	<script src="popup.js"></script>
+</body>
+</html>

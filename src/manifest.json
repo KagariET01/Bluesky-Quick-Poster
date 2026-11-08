@@ -1,0 +1,26 @@
+{
+	"manifest_version": 3,
+	"name": "Bluesky Quick Poster",
+	"version": "0.0.1",
+	"description": "在任何網頁點擊即可快速發布貼文至 Bluesky",
+	"permissions": [
+		"storage"
+	],
+	"host_permissions": [
+		"https://bsky.social/*",
+		"https://bsky.kandayuri.net/*",
+		"https://x.com/*",
+		"https://twitter.com/*"
+	],
+	"action": {
+		"default_popup": "popup.html",
+		"default_title": "發布至 Bluesky"
+	},
+	"content_scripts": [
+		{
+			"matches": ["https://x.com/*", "https://twitter.com/*"],
+			"js": ["twitter_content.js"],
+			"run_at": "document_idle"
+		}
+	]
+}
