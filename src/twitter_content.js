@@ -1,5 +1,44 @@
-// 自架 PDS 位址
-// const PDS_URL = 'https://bsky.kandayuri.net';
+// 暫存即將被編輯框認領的 Quote 網址
+let pendingQuoteUrl = null;
+
+// 全域監聽：捕獲 Quote 與 Draft 點擊事件，不再暴力阻止原生選單彈出
+document.addEventListener(
+	'click',
+	(e) => {
+		// 1. 監聽推文內的轉發按鈕 (預先記下推文網址，若使用者後續選「Quote」時由編輯框認領)
+		const retweetBtn = e.target.closest('[data-testid="retweet"], [data-testid="unretweet"]');
+		if (retweetBtn) {
+			const article = retweetBtn.closest('article');
+			if (article) {
+				const timeLink = article.querySelector('time')?.closest('a');
+				const statusLink = article.querySelector('a[href*="/status/"]');
+				const tweetUrl = timeLink?.href || statusLink?.href;
+				if (tweetUrl) {
+					pendingQuoteUrl = tweetUrl;
+				}
+			}
+			return;
+		}
+
+		// 2. 監聽 Twitter 選單中的「Quote / 引用推文」選項
+		const quoteMenuItem = e.target.closest('a[href*="/compose/tweet"], [role="menuitem"]');
+		if (quoteMenuItem && (quoteMenuItem.innerText.includes('Quote') || quoteMenuItem.innerText.includes('引用'))) {
+			console.log('[Crosspost] 使用者進入 Quote 模式，等待編輯框認領:', pendingQuoteUrl);
+			return;
+		}
+
+		// 3. 監聽 Drafts（草稿）列表中的項目點擊
+		const draftItem = e.target.closest('div[role="button"][tabindex="0"], div[data-testid="cellInnerDiv"]');
+		if (draftItem) {
+			const text = draftItem.innerText || '';
+			const match = text.match(/https?:\/\/(?:x|twitter)\.com\/[^\/\s]+\/status\/\d+/);
+			if (match) {
+				pendingQuoteUrl = match[0];
+			}
+		}
+	},
+	true
+);
 
 // 全域狀態鎖與發送旗標
 let isPostingLocked = false;
@@ -27,10 +66,10 @@ function observeTwitterDOM() {
 		isChecking = true;
 
 		try {
-			// injectGreenButton();
 			setupCustomBottomBar();
 			bindShortcutKeys();
-			validatePostReadiness(); // 即時動態判定按鈕啟用狀態
+			validatePostReadiness();
+			observeTwitterDropdownMenu(); // 即時偵測並擴充轉發選單
 		} finally {
 			isChecking = false;
 		}
@@ -95,7 +134,7 @@ function injectGreenButton() {
 }
 */
 
-// 2. 嚴格限定：只在「建立貼文彈窗」或「首頁頂部(/home)主發文區」生效，徹底排除所有推文回覆欄
+// 2. 嚴格限定：只在「建立貼文/Quote 彈窗」或「首頁頂部(/home)主發文區」生效
 function setupCustomBottomBar() {
 	const modal = document.querySelector('[aria-labelledby="modal-header"][role="dialog"]');
 
@@ -103,37 +142,49 @@ function setupCustomBottomBar() {
 	let nativeSubmitBtn = null;
 
 	if (modal) {
-		// 排除回覆（Reply）彈窗
-		const isReply =
-			modal.querySelector('[data-testid="tweetTextarea_0_label"]')?.innerText?.includes('reply') ||
-			modal.innerText.includes('Replying to') ||
-			modal.innerText.includes('回覆給') ||
-			modal.querySelector('[data-testid="tweetTextarea_0"]')?.getAttribute('aria-label')?.includes('reply');
+		// 檢查彈窗是否包含 Quote 卡片或剛才捕獲的 pendingQuoteUrl
+		const hasQuoteCard =
+			modal.querySelector('[data-testid="quoteTweet"], div[role="link"][tabindex="0"]') !== null ||
+			Boolean(pendingQuoteUrl);
 
-		if (isReply) return;
+		// 取得輸入框本體的標籤與 Placeholder
+		const textarea = modal.querySelector('[data-testid^="tweetTextarea_"]');
+		const placeholder = textarea?.getAttribute('aria-label') || '';
+		const labelText = modal.querySelector('[data-testid="tweetTextarea_0_label"]')?.innerText || '';
+
+		// 只有在「確定不是 Quote」且「文字框標籤明確是 Reply」的情境下，才判定為回覆彈窗
+		const isExplicitReply =
+			(placeholder.toLowerCase().includes('reply') || labelText.toLowerCase().includes('reply')) &&
+			!hasQuoteCard;
+
+		// 若彈窗上方有貼文串相連線（tweet-thread connector），且沒有 Quote 卡片，才是真正的推文回覆
+		const hasThreadLine = modal.querySelector('[data-testid="cellInnerDiv"] [dir="auto"]') && !hasQuoteCard;
+
+		if (isExplicitReply && hasThreadLine) {
+			return;
+		}
 
 		targetRoot = modal;
 		nativeSubmitBtn = modal.querySelector('[data-testid="tweetButton"]');
 	} else {
-		// 嚴格限制：非彈窗模式下，必須在首頁 (/home 或根目錄) 才允許掛載，其餘貼文詳細頁 (/status/...) 直接退出
+		// 非彈窗模式：僅在首頁 (/home 或根目錄) 生效
 		const path = window.location.pathname;
 		const isHomePage = path === '/home' || path === '/';
 		if (!isHomePage) return;
 
-		// 尋找首頁最上方 (Top) 的主發文按鈕，並嚴格過濾排除包含任何 reply 特徵的區塊
-		const inlineButtons = Array.from(document.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]'));
+		const inlineButtons = Array.from(
+			document.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]')
+		);
 		for (const btn of inlineButtons) {
-			// 若按鈕位於推文主體或帶有回覆文字的區塊內，直接排除
 			const replyContainer = btn.closest('article, [data-testid="cellInnerDiv"]');
-			const isReplyBox = replyContainer && (
-				replyContainer.innerText.includes('Replying to') || 
-				replyContainer.innerText.includes('回覆給') ||
-				replyContainer.innerText.includes('Post your reply') ||
-				replyContainer.innerText.includes('發布你的回覆')
-			);
+			const isReplyBox =
+				replyContainer &&
+				(replyContainer.innerText.includes('Replying to') ||
+					replyContainer.innerText.includes('回覆給') ||
+					replyContainer.innerText.includes('Post your reply') ||
+					replyContainer.innerText.includes('發布你的回覆'));
 
 			if (!isReplyBox) {
-				// 確保該輸入框確實是首頁頂端發文框（對應 placeholder 為 "What is happening?!" 或 "有什麼新鮮事？"）
 				const textarea = btn.closest('div[class*="css-175oi2r"]')?.querySelector('[data-testid^="tweetTextarea_"]');
 				const placeholder = textarea?.getAttribute('aria-label') || '';
 				if (!placeholder.toLowerCase().includes('reply')) {
@@ -150,14 +201,20 @@ function setupCustomBottomBar() {
 	// 隱藏 Twitter 原生按鈕（保留在 DOM 供程式觸發）
 	nativeSubmitBtn.style.setProperty('display', 'none', 'important');
 
-	// 採用指定的 4 層父容器鎖定
 	const buttonHost = nativeSubmitBtn.parentElement.parentElement.parentElement.parentElement;
 	if (!buttonHost) return;
 
 	buttonHost.style.margin = '0';
 
-	// 避免重複掛載
-	if (buttonHost.querySelector('#crosspost-toolbar-row')) {
+	// 尋找是否已有工具列
+	let existingRow = buttonHost.querySelector('#crosspost-toolbar-row');
+	if (existingRow) {
+		// 若已有工具列，檢查是否有待認領的 Quote 網址
+		if (pendingQuoteUrl && !existingRow.dataset.quoteUrl) {
+			existingRow.dataset.quoteUrl = pendingQuoteUrl;
+			console.log('[Crosspost] 工具列成功認領 Quote 網址:', pendingQuoteUrl);
+			pendingQuoteUrl = null;
+		}
 		updatePlatformButtonsStyle();
 		return;
 	}
@@ -175,6 +232,13 @@ function setupCustomBottomBar() {
 		box-sizing: border-box;
 		width: 100%;
 	`;
+
+	// 若當前有 pendingQuoteUrl，立即注入 dataset
+	if (pendingQuoteUrl) {
+		newRow.dataset.quoteUrl = pendingQuoteUrl;
+		console.log('[Crosspost] 新工具列建立並成功認領 Quote 網址:', pendingQuoteUrl);
+		pendingQuoteUrl = null;
+	}
 
 	// 左側平台開關區 (X, Bsky)
 	const leftGroup = document.createElement('div');
@@ -479,13 +543,20 @@ async function executePlatformPosting(config) {
 
 function resetPostingState(btn, span, originalText) {
 	isPostingLocked = false;
+	pendingQuoteUrl = null;
+
+	const toolbarRow = document.getElementById('crosspost-toolbar-row');
+	if (toolbarRow) {
+		delete toolbarRow.dataset.quoteUrl;
+	}
+
 	if (span) span.innerText = originalText;
 	if (btn) btn.style.pointerEvents = 'auto';
 	updatePlatformButtonsStyle();
 	validatePostReadiness();
 }
 
-// 5. DOM 貼文與多媒體精確擷取
+// 5. DOM 貼文與多媒體擷取（支援在串文末端追加獨立 Quote 貼文）
 async function extractTweetsFromModal() {
 	const modal = document.querySelector('[aria-labelledby="modal-header"][role="dialog"]');
 	const searchRoot = modal || document;
@@ -550,7 +621,49 @@ async function extractTweetsFromModal() {
 		}
 	}
 
+	// 檢查發文區內是否存在被引用的推文 (Quote)
+	const quotedUrl = getQuotedTweetUrl(searchRoot);
+	if (quotedUrl) {
+		// 在串文最後追加一則獨立的 Quote 貼文
+		results.push({
+			text: `Quote: ${quotedUrl}`,
+			images: [],
+			quotedUrl: quotedUrl,
+		});
+	}
+
 	return results;
+}
+
+function attachQuoteUrlToActiveToolbar(quoteUrl) {
+	const row = document.getElementById('crosspost-toolbar-row');
+	if (row) {
+		row.dataset.quoteUrl = quoteUrl;
+		console.log('[Crosspost] 狀態已寫入至當前複合工具列 DOM:', quoteUrl);
+	}
+}
+
+// 輔助函式：尋找被引用的推文網址
+function getQuotedTweetUrl(searchRoot) {
+	console.log('[Crosspost] 檢查目前發文列是否綁定 Quote 狀態...');
+
+	// 1. 優先從複合工具列身上的 dataset 讀取
+	const toolbarRow = searchRoot.querySelector('#crosspost-toolbar-row') || document.getElementById('crosspost-toolbar-row');
+	if (toolbarRow && toolbarRow.dataset.quoteUrl) {
+		console.log('[Crosspost] 成功自工具列 DOM dataset 提取 Quote 網址:', toolbarRow.dataset.quoteUrl);
+		return toolbarRow.dataset.quoteUrl;
+	}
+
+	// 2. 兜底掃描：直接在當前彈窗或發文框內部的純文字/連結尋找 status 網址（適用 Draft 復原情境）
+	const activeDialog = document.querySelector('[role="dialog"]') || searchRoot || document;
+	const match = (activeDialog.innerText || '').match(/https?:\/\/(?:x|twitter)\.com\/[^\/\s]+\/status\/\d+/);
+	if (match) {
+		console.log('[Crosspost] 從彈窗文本掃描命中 Quote 網址:', match[0]);
+		return match[0];
+	}
+
+	console.warn('[Crosspost] 未在當前發文框內偵測到任何 Quote 狀態');
+	return null;
 }
 
 // 6. 登入取得 Bluesky Session
@@ -581,97 +694,134 @@ async function getBskySession() {
 // 7. 上傳圖片 Blob 到自架 PDS
 // 上傳圖片 Blob 到該使用者的動態 PDS
 async function uploadBlobToPDS(pdsUrl, jwt, blob) {
-  const res = await fetch(`${pdsUrl}/xrpc/com.atproto.repo.uploadBlob`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      'Content-Type': blob.type || 'image/jpeg',
-    },
-    body: blob,
-  });
+	const res = await fetch(`${pdsUrl}/xrpc/com.atproto.repo.uploadBlob`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${jwt}`,
+			'Content-Type': blob.type || 'image/jpeg',
+		},
+		body: blob,
+	});
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`上傳圖片到 PDS 失敗: ${errText}`);
-  }
+	if (!res.ok) {
+		const errText = await res.text();
+		throw new Error(`上傳圖片到 PDS 失敗: ${errText}`);
+	}
 
-  const data = await res.json();
-  return data.blob;
+	const data = await res.json();
+	return data.blob;
 }
 
-// 8. 發布貼文至 Bluesky
-// 依序發布串文到動態 PDS
+// 8. 依序發布串文至 Bluesky
 async function postThreadToBluesky(postsData) {
-  const session = await getBskySession();
-  const jwt = session.accessJwt;
-  const did = session.did;
-  const pdsUrl = session.pdsUrl;
+	const session = await getBskySession();
+	const jwt = session.accessJwt;
+	const did = session.did;
+	const pdsUrl = session.pdsUrl;
 
-  let rootRef = null;
-  let parentRef = null;
+	let rootRef = null;
+	let parentRef = null;
 
-  for (let i = 0; i < postsData.length; i++) {
-    const postItem = postsData[i];
+	for (let i = 0; i < postsData.length; i++) {
+		const postItem = postsData[i];
+		let embed = undefined;
 
-    let embed = undefined;
-    if (postItem.images && postItem.images.length > 0) {
-      const uploadedImages = [];
-      for (const imgBlob of postItem.images) {
-        const pdsBlobRef = await uploadBlobToPDS(pdsUrl, jwt, imgBlob);
-        uploadedImages.push({
-          alt: '',
-          image: pdsBlobRef,
-        });
-      }
+		// 1. 若該篇是使用者主動發送的相簿多圖貼文
+		if (postItem.images && postItem.images.length > 0) {
+			const uploadedImages = [];
+			for (const imgBlob of postItem.images) {
+				const pdsBlobRef = await uploadBlobToPDS(pdsUrl, jwt, imgBlob);
+				uploadedImages.push({
+					alt: '',
+					image: pdsBlobRef,
+				});
+			}
 
-      embed = {
-        $type: 'app.bsky.embed.images',
-        images: uploadedImages,
-      };
-    }
+			embed = {
+				$type: 'app.bsky.embed.images',
+				images: uploadedImages,
+			};
+		} 
+		// 2. 若為 Quote / Repost 的外部連結卡片
+		else if (postItem.quotedUrl) {
+			let thumbRef = undefined;
 
-    const record = {
-      $type: 'app.bsky.feed.post',
-      text: postItem.text,
-      createdAt: new Date().toISOString(),
-    };
+			// 若有劫持到原推文的第一張圖片，上傳至 PDS 產生 thumb blob
+			if (postItem.thumbBlob) {
+				try {
+					thumbRef = await uploadBlobToPDS(pdsUrl, jwt, postItem.thumbBlob);
+				} catch (e) {
+					console.warn('[Crosspost] 上傳縮圖至 PDS 失敗，退回無縮圖模式:', e);
+				}
+			}
 
-    if (embed) {
-      record.embed = embed;
-    }
+			const externalObj = {
+				uri: postItem.quotedUrl,
+				title: postItem.title || 'Post on X',
+				description: postItem.description || '',
+			};
 
-    if (rootRef && parentRef) {
-      record.reply = {
-        root: { uri: rootRef.uri, cid: rootRef.cid },
-        parent: { uri: parentRef.uri, cid: parentRef.cid },
-      };
-    }
+			if (thumbRef) {
+				externalObj.thumb = thumbRef; // 標準 ATProto blob 結構
+			}
 
-    const res = await fetch(`${pdsUrl}/xrpc/com.atproto.repo.createRecord`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${jwt}`,
-      },
-      body: JSON.stringify({
-        repo: did,
-        collection: 'app.bsky.feed.post',
-        record: record,
-      }),
-    });
+			embed = {
+				$type: 'app.bsky.embed.external',
+				external: externalObj,
+			};
+		}
 
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.message || '無法建立貼文紀錄');
-    }
+		// 處理內文超連結與 Facets
+		const { text: processedText, facets } = replaceUrlsWithLinkFacets(postItem.text, 'link');
 
-    const createdRecord = await res.json();
+		const record = {
+			$type: 'app.bsky.feed.post',
+			text: processedText,
+			createdAt: new Date().toISOString(),
+			langs: ['zh-TW', 'en'],
+		};
 
-    if (!rootRef) {
-      rootRef = { uri: createdRecord.uri, cid: createdRecord.cid };
-    }
-    parentRef = { uri: createdRecord.uri, cid: createdRecord.cid };
-  }
+		if (embed) {
+			record.embed = embed;
+		}
+
+		if (facets) {
+			record.facets = facets;
+		}
+
+		// 串文關聯判斷
+		if (rootRef && parentRef) {
+			record.reply = {
+				root: { uri: rootRef.uri, cid: rootRef.cid },
+				parent: { uri: parentRef.uri, cid: parentRef.cid },
+			};
+		}
+
+		const res = await fetch(`${pdsUrl}/xrpc/com.atproto.repo.createRecord`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				Authorization: `Bearer ${jwt}`,
+			},
+			body: JSON.stringify({
+				repo: did,
+				collection: 'app.bsky.feed.post',
+				record: record,
+			}),
+		});
+
+		if (!res.ok) {
+			const err = await res.json();
+			throw new Error(err.message || '無法建立貼文紀錄');
+		}
+
+		const createdRecord = await res.json();
+
+		if (!rootRef) {
+			rootRef = { uri: createdRecord.uri, cid: createdRecord.cid };
+		}
+		parentRef = { uri: createdRecord.uri, cid: createdRecord.cid };
+	}
 }
 
 // 根據 handle 自動解析該帳號所屬的權威 PDS 伺服器網址
@@ -718,5 +868,469 @@ async function resolvePdsUrl(handle) {
 	await chrome.storage.local.set({ [cacheKey]: pdsUrl });
 	return pdsUrl;
 }
+
+// 建立仿 Twitter 原生外觀的「複合轉推 (Repost)」浮動彈窗
+function openCrosspostRepostModal(tweetUrl, tweetArticle) {
+	// 若畫面上已有彈窗先移除
+	const oldModal = document.getElementById('crosspost-repost-modal');
+	if (oldModal) oldModal.remove();
+
+	// 取得原推文作者與預覽摘要
+	const authorName = tweetArticle.querySelector('[data-testid="User-Name"]')?.innerText?.split('\n')[0] || 'Post';
+	const tweetText = tweetArticle.querySelector('[data-testid="tweetText"]')?.innerText?.slice(0, 100) || '';
+
+	// 彈窗背景遮罩
+	const overlay = document.createElement('div');
+	overlay.id = 'crosspost-repost-modal';
+	overlay.style.cssText = `
+		position: fixed;
+		top: 0; left: 0; width: 100vw; height: 100vh;
+		background-color: rgba(91, 112, 131, 0.4);
+		display: flex; align-items: center; justify-content: center;
+		z-index: 999999;
+		font-family: TwitterChirp, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	`;
+
+	// 彈窗主體
+	const modalBox = document.createElement('div');
+	modalBox.style.cssText = `
+		background-color: rgb(0, 0, 0);
+		border: 1px solid rgb(47, 51, 54);
+		border-radius: 16px;
+		width: 420px;
+		max-width: 90vw;
+		padding: 20px;
+		box-sizing: border-box;
+		box-shadow: 0 8px 24px rgba(255, 255, 255, 0.1);
+	`;
+
+	// 標題與關閉按鈕
+	modalBox.innerHTML = `
+		<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+			<h3 style="margin: 0; color: #fff; font-size: 18px; font-weight: 700;">Repost to Platforms</h3>
+			<div id="crosspost-modal-close" style="color: #71767b; font-size: 20px; cursor: pointer; padding: 4px;">✕</div>
+		</div>
+		<div style="background: rgb(22, 24, 28); border: 1px solid rgb(47, 51, 54); border-radius: 8px; padding: 10px 12px; margin-bottom: 16px;">
+			<div style="color: #1d9bf0; font-weight: 700; font-size: 13px; margin-bottom: 4px;">${authorName}</div>
+			<div style="color: #e7e9ea; font-size: 14px; line-height: 18px; word-break: break-word;">${tweetText || tweetUrl}</div>
+		</div>
+	`;
+
+	// 平台開關與發送列 (重用既有 layout)
+	const actionRow = document.createElement('div');
+	actionRow.style.cssText = `
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		margin-top: 16px;
+	`;
+
+	// 平台選擇狀態 (預設遵循 targetPlatforms)
+	const localPlatforms = { ...targetPlatforms };
+
+	const leftGroup = document.createElement('div');
+	leftGroup.style.cssText = `display: flex; gap: 8px;`;
+
+	const xBtn = createToggleBtn('x', 'X (Twitter)', localPlatforms.x);
+	const bskyBtn = createToggleBtn('bsky', 'Bluesky', localPlatforms.bsky);
+
+	// 覆寫點擊邏輯以同步 localPlatforms
+	xBtn.onclick = (e) => {
+		e.stopPropagation();
+		localPlatforms.x = !localPlatforms.x;
+		syncToggleStyles();
+	};
+	bskyBtn.onclick = (e) => {
+		e.stopPropagation();
+		localPlatforms.bsky = !localPlatforms.bsky;
+		syncToggleStyles();
+	};
+
+	function syncToggleStyles() {
+		[xBtn, bskyBtn].forEach((btn) => {
+			const key = btn.dataset.platform;
+			const active = localPlatforms[key];
+			if (active) {
+				btn.style.backgroundColor = key === 'x' ? 'rgba(255, 255, 255, 0.15)' : 'rgba(15, 115, 255, 0.2)';
+				btn.style.border = key === 'x' ? '1px solid rgba(255, 255, 255, 0.4)' : '1px solid rgb(15, 115, 255)';
+				btn.style.color = key === 'x' ? '#ffffff' : 'rgb(68, 150, 255)';
+			} else {
+				btn.style.backgroundColor = 'transparent';
+				btn.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+				btn.style.color = '#71767b';
+			}
+		});
+
+		const activeList = [];
+		if (localPlatforms.x) activeList.push('X');
+		if (localPlatforms.bsky) activeList.push('Bsky');
+		submitBtn.querySelector('span').innerText = activeList.length > 0 ? `Repost (${activeList.join('+')})` : 'Repost';
+		
+		// 若全沒選則禁用
+		const hasActive = localPlatforms.x || localPlatforms.bsky;
+		submitBtn.style.opacity = hasActive ? '1' : '0.5';
+		submitBtn.style.pointerEvents = hasActive ? 'auto' : 'none';
+	}
+
+	leftGroup.appendChild(xBtn);
+	leftGroup.appendChild(bskyBtn);
+
+	// 右側 Repost 按鈕
+	const submitBtn = document.createElement('button');
+	submitBtn.type = 'button';
+	submitBtn.style.cssText = `
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-height: 36px;
+		padding: 0 20px;
+		background-color: rgb(239, 243, 244);
+		color: rgb(15, 20, 25);
+		border: none;
+		border-radius: 9999px;
+		font-family: inherit;
+		font-size: 14px;
+		font-weight: 700;
+		cursor: pointer;
+	`;
+	submitBtn.innerHTML = `<span>Repost (X+Bsky)</span>`;
+
+	// 點擊觸發轉發作業
+	submitBtn.onclick = async (e) => {
+		e.stopPropagation();
+		if (!localPlatforms.x && !localPlatforms.bsky) return;
+
+		submitBtn.style.pointerEvents = 'none';
+		const span = submitBtn.querySelector('span');
+
+		try {
+			// 1. Bluesky 發送流程
+			if (localPlatforms.bsky) {
+				span.innerText = '讀取推文內容與縮圖...';
+
+				// 核心：從 article DOM 完整劫持 title, description 與縮圖 Blob
+				const details = await extractTweetDetailsFromArticle(tweetArticle);
+
+				span.innerText = '發至 Bluesky...';
+				await postThreadToBluesky([
+					{
+						text: `Repost: ${tweetUrl}`,
+						images: [],
+						quotedUrl: tweetUrl,
+						title: details.title,
+						description: details.description,
+						thumbBlob: details.thumbBlob, // 傳入縮圖
+					},
+				]);
+			}
+
+			// 2. Twitter 原生轉發流程
+			if (localPlatforms.x) {
+				span.innerText = '觸發 Twitter 原生轉發...';
+				await triggerNativeTwitterRepost(tweetArticle);
+			}
+
+			span.innerText = '轉發完成！';
+			setTimeout(() => overlay.remove(), 800);
+		} catch (err) {
+			console.error(err);
+			alert(`轉發失敗: ${err.message}`);
+			span.innerText = 'Repost';
+			submitBtn.style.pointerEvents = 'auto';
+		}
+	};
+
+	actionRow.appendChild(leftGroup);
+	actionRow.appendChild(submitBtn);
+	modalBox.appendChild(actionRow);
+	overlay.appendChild(modalBox);
+
+	// 點擊背景遮罩或 X 關閉
+	overlay.onclick = (e) => {
+		if (e.target === overlay || e.target.id === 'crosspost-modal-close') {
+			overlay.remove();
+		}
+	};
+
+	document.body.appendChild(overlay);
+	syncToggleStyles();
+}
+
+// 輔助：模擬點擊 Twitter 原生轉推，具備「未呼叫補點重試」與「遇 Undo Repost 維持原樣」機制
+async function triggerNativeTwitterRepost(tweetArticle) {
+	const nativeRetweetBtn = tweetArticle.querySelector(
+		'[data-testid="retweet"], [data-testid="unretweet"]'
+	);
+	if (!nativeRetweetBtn) return;
+
+	// 1. 確保選單順利被喚出（若未出現則自動補按）
+	let dropdown = document.querySelector('[data-testid="Dropdown"]');
+
+	if (!dropdown) {
+		isBypassingOriginalClick = true;
+		nativeRetweetBtn.click();
+		isBypassingOriginalClick = false;
+
+		// 輪詢等待最多 600ms，每 100ms 檢查一次
+		for (let i = 0; i < 6; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			dropdown = document.querySelector('[data-testid="Dropdown"]');
+			if (dropdown) break;
+		}
+
+		// 需求 1：若仍未叫出選單，再補點一次
+		if (!dropdown) {
+			isBypassingOriginalClick = true;
+			nativeRetweetBtn.click();
+			isBypassingOriginalClick = false;
+
+			for (let i = 0; i < 4; i++) {
+				await new Promise((resolve) => setTimeout(resolve, 100));
+				dropdown = document.querySelector('[data-testid="Dropdown"]');
+				if (dropdown) break;
+			}
+		}
+	}
+
+	if (!dropdown) {
+		console.warn('[Crosspost] 無法喚出 Twitter 原生轉推選單');
+		return;
+	}
+
+	// 2. 檢視選單項目
+	const menuItems = Array.from(dropdown.querySelectorAll('[role="menuitem"]'));
+
+	// 需求 2：若出現 Undo Repost / 取消轉推，不點擊，直接關閉選單維持原樣
+	const isAlreadyReposted = menuItems.some((item) => {
+		const text = item.innerText || '';
+		return (
+			text.includes('Undo') ||
+			text.includes('取消轉推') ||
+			text.includes('取消轉發') ||
+			text.includes('Undo Repost')
+		);
+	});
+
+	if (isAlreadyReposted) {
+		console.log('[Crosspost] 此推文已在 X 轉發過，維持原樣不點擊 Undo');
+		document.body.click(); // 點擊空白處關閉選單
+		return;
+	}
+
+	// 3. 尋找並點擊尚未轉發的「Repost / 轉推」選項
+	const repostItem = menuItems.find((item) => {
+		const text = item.innerText || '';
+		return (
+			(text.includes('Repost') || text.includes('轉推') || text.includes('轉發')) &&
+			!text.includes('Quote') &&
+			!text.includes('引用') &&
+			!text.includes('SNS')
+		);
+	});
+
+	if (repostItem) {
+		repostItem.click();
+	} else {
+		document.body.click();
+	}
+}
+
+// 監聽 Twitter 原生轉發選單彈出，並以原汁原味的結構劫持注入「Repost to other SNS」選項
+function observeTwitterDropdownMenu() {
+	const dropdown = document.querySelector('[data-testid="Dropdown"]');
+	if (!dropdown || dropdown.dataset.crosspostInjected) return;
+
+	// 尋找選單內的第一個原生項目作為模板（Clone Template）
+	const menuItems = Array.from(dropdown.querySelectorAll('[role="menuitem"]'));
+	const templateItem = menuItems[0];
+	if (!templateItem) return;
+
+	// 檢查選單內是否屬於轉發相關選單 (Repost / Undo Repost / Quote)
+	const isRetweetMenu = menuItems.some((item) => {
+		const txt = item.innerText || '';
+		return (
+			txt.includes('Repost') ||
+			txt.includes('轉推') ||
+			txt.includes('轉發') ||
+			txt.includes('Quote') ||
+			txt.includes('引用') ||
+			txt.includes('Undo')
+		);
+	});
+
+	if (!isRetweetMenu) return;
+	dropdown.dataset.crosspostInjected = 'true';
+
+	// 尋找觸發此選單的推文 (<article>)
+	const activeTriggerBtn = document.querySelector(
+		'[data-testid="retweet"][aria-expanded="true"], [data-testid="unretweet"][aria-expanded="true"]'
+	);
+	const article = activeTriggerBtn?.closest('article');
+
+	// 取得來源推文網址
+	const timeLink = article?.querySelector('time')?.closest('a');
+	const statusLink = article?.querySelector('a[href*="/status/"]');
+	const tweetUrl = timeLink?.href || statusLink?.href;
+
+	// 核心改進：直接 clone 原生選單項目，完整繼承原生外層與內層所有 class 與字型結構
+	const customMenuItem = templateItem.cloneNode(true);
+
+	// 1. 替換文字內容，保留所有原生字型 class
+	const textContainer = customMenuItem.querySelector('span, div[dir="ltr"]');
+	if (textContainer) {
+		// 找出最深層的純文字節點直接替換
+		const deepestSpan = customMenuItem.querySelector('span:not(:has(*))') || textContainer;
+		deepestSpan.innerText = 'Repost to other SNS (Bsky)';
+	}
+
+	// 2. 劫持圖示：將 SVG 圖標換上轉發 path，並維持原生 SVG 的 class、尺寸與排版
+	const svgEl = customMenuItem.querySelector('svg');
+	if (svgEl) {
+		svgEl.setAttribute('viewBox', '0 0 24 24');
+		svgEl.style.color = 'rgb(29, 155, 240)';
+		svgEl.style.fill = 'currentColor';
+		svgEl.innerHTML = `
+			<g>
+				<path d="M4.5 3.88l4.432 4.14-1.364 1.46L5.5 7.55V16c0 1.1.896 2 2 2H13v2H7.5c-2.209 0-4-1.79-4-4V7.55L1.432 9.48.068 8.02 4.5 3.88zM16.5 6H11V4h5.5c2.209 0 4 1.79 4 4v8.45l2.068-1.93 1.364 1.46-4.432 4.14-4.432-4.14 1.364-1.46 2.068 1.93V8c0-1.1-.896-2-2-2z"></path>
+			</g>
+		`;
+	}
+
+	// 3. 綁定自訂點擊動作
+	customMenuItem.onclick = (e) => {
+		e.preventDefault();
+		e.stopPropagation();
+
+		// 關閉 Twitter 原生下拉選單
+		document.body.click();
+
+		if (tweetUrl && article) {
+			openCrosspostRepostModal(tweetUrl, article);
+		} else {
+			alert('無法取得該貼文的完整網址');
+		}
+	};
+
+	// 插入到選單的最末尾
+	dropdown.appendChild(customMenuItem);
+}
+
+// 計算字串在 UTF-8 編碼下的 Byte 長度
+function getUtf8ByteLength(str) {
+	return new TextEncoder().encode(str).byteLength;
+}
+
+/**
+ * 將文字中的所有 URL 取代為指定錨文字（預設為 'link'）
+ * 同時精確計算每段 'link' 的 UTF-8 Byte 範圍並產生 app.bsky.richtext.facet
+ *
+ * @param {string} originalText 原始貼文內文
+ * @param {string} anchorText 替代顯示文字，預設為 'link'
+ * @returns {{ text: string, facets: Array|undefined }}
+ */
+function replaceUrlsWithLinkFacets(originalText, anchorText = 'link') {
+	if (!originalText) return { text: '', facets: undefined };
+
+	const urlRegex = /https?:\/\/[^\s]+/g;
+	const facets = [];
+	
+	let newText = '';
+	let lastIndex = 0;
+	let match;
+
+	const anchorByteLen = getUtf8ByteLength(anchorText);
+
+	while ((match = urlRegex.exec(originalText)) !== null) {
+		const rawUrl = match[0];
+		const matchStart = match.index;
+
+		// 1. 將上一個位置到當前符合項目之間的純文字追加進 newText
+		const precedingText = originalText.slice(lastIndex, matchStart);
+		newText += precedingText;
+
+		// 2. 計算當前 'link' 文字的起始 UTF-8 Byte 位移
+		const currentByteStart = getUtf8ByteLength(newText);
+		const currentByteEnd = currentByteStart + anchorByteLen;
+
+		// 3. 追加替代的錨點文字（例如 'link'）
+		newText += anchorText;
+
+		// 4. 建立符合 AT Protocol 規範的 facet
+		facets.push({
+			index: {
+				byteStart: currentByteStart,
+				byteEnd: currentByteEnd,
+			},
+			features: [
+				{
+					$type: 'app.bsky.richtext.facet#link',
+					uri: rawUrl,
+				},
+			],
+		});
+
+		lastIndex = matchStart + rawUrl.length;
+	}
+
+	// 追加最後剩餘的文字
+	newText += originalText.slice(lastIndex);
+
+	return {
+		text: newText,
+		facets: facets.length > 0 ? facets : undefined,
+	};
+}
+
+// 從目標推文的 <article> 中提取 Title、Description 與第一張圖片 Blob
+async function extractTweetDetailsFromArticle(article) {
+	let title = 'Post on X';
+	let description = '';
+	let thumbBlob = null;
+
+	if (!article) return { title, description, thumbBlob };
+
+	// 1. 劫持作者資訊 (Title)
+	// Twitter 結構: [data-testid="User-Name"] 內有「顯示名稱」與「@handle」
+	const userNameEl = article.querySelector('[data-testid="User-Name"]');
+	if (userNameEl) {
+		const rawLines = (userNameEl.innerText || '').split('\n').filter(Boolean);
+		const displayName = rawLines[0] || '';
+		const handle = rawLines.find((l) => l.startsWith('@')) || '';
+		if (displayName && handle) {
+			title = `${displayName} (${handle}) on X`;
+		} else if (displayName) {
+			title = `${displayName} on X`;
+		}
+	}
+
+	// 2. 劫持推文文字 (Description)
+	const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
+	if (tweetTextEl) {
+		description = tweetTextEl.innerText.trim();
+	}
+
+	// 3. 劫持第一張圖片 (Thumb)
+	// Twitter 的圖片大多是 img[src*="pbs.twimg.com/media/"] 或帶有 blob: 的縮圖
+	const imgEl = article.querySelector('div[data-testid="tweetPhoto"] img, img[src*="pbs.twimg.com/media/"]');
+	if (imgEl && imgEl.src) {
+		try {
+			// 替換 Twitter 縮圖網址為較高畫質/標準 jpeg 格式以利抓取
+			let imgSrc = imgEl.src;
+			if (imgSrc.includes('format=')) {
+				imgSrc = imgSrc.replace(/format=[a-zA-Z0-9]+/, 'format=jpg');
+			}
+			const response = await fetch(imgSrc);
+			if (response.ok) {
+				thumbBlob = await response.blob();
+			}
+		} catch (e) {
+			console.warn('[Crosspost] 抓取推文縮圖 Blob 失敗:', e);
+		}
+	}
+
+	return { title, description, thumbBlob };
+}
+
+
 
 init();

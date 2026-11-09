@@ -36,6 +36,8 @@
 	-	建立新貼文
 		-	建立串文（多篇貼文串在一起，並同時發送）
 		-	附上圖片
+		-	Create Repost
+		-	Create Quote
 
 #	未來方向
 
@@ -48,6 +50,4 @@
 	-	新增更多SNS支援
 	-	更好的UI介面、UI切版（以適應多帳號、多SNS、設定頁面）
 -	Twitter
-	-	Create Repost
-	-	Create Quote
 	-	自動拆成 Quote（如果用藍勾勾發長文）
